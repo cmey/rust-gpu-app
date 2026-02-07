@@ -204,7 +204,11 @@ async fn execute_gpu_compute(
         });
         compute_pass.set_pipeline(&compute_pipeline);
         compute_pass.set_bind_group(0, &bind_group, &[]);
-        compute_pass.dispatch_workgroups(input_data.len() as u32, 1, 1);
+        
+        // Calculate workgroup count based on a workgroup size of 64 (matching the shader)
+        let workgroup_size = 64;
+        let workgroup_count = (input_data.len() as u32 + workgroup_size - 1) / workgroup_size;
+        compute_pass.dispatch_workgroups(workgroup_count, 1, 1);
     }
 
     // Copy results to staging buffer
