@@ -30,6 +30,8 @@ The application uses the **wgpu** framework, which provides:
    ```
 
 2. **GPU Compute Shader (WGSL)**: Performs parallel computation on the GPU
+   - Defined in `src/compute.wgsl` for better IDE support (syntax highlighting, linting)
+   - Loaded at compile-time using `include_str!` macro
    - Reads input data from GPU buffer
    - Processes each element (multiplies value by multiplier)
    - Writes results to output buffer
