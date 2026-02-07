@@ -44,7 +44,7 @@ The application uses the **wgpu** framework, which provides:
 
 ### Prerequisites
 
-- Rust 1.70+ (install from [rustup.rs](https://rustup.rs))
+- Rust 1.75+ (install from [rustup.rs](https://rustup.rs))
 - GPU with Vulkan, Metal, or DirectX 12 support (or software rendering fallback)
 
 ### Build
