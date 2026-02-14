@@ -1,12 +1,12 @@
 use bytemuck::{Pod, Zeroable};
 
-/// Shared struct definition that works on both CPU and GPU
-/// The GPU shader will use the same memory layout
+const NUM_CHANNELS: usize = 64;
+const NUM_SAMPLES: usize = 16;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct DataElement {
-    value: f32,
-    multiplier: f32,
+struct BeamformingConfig {
+    speed_of_sound: f32,
 }
 
 fn main() {
@@ -14,275 +14,152 @@ fn main() {
 }
 
 async fn run() {
-    println!("=== Rust GPU Compute Application ===\n");
-
-    // Initialize GPU - enumerate available adapters first
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::all(),
-        ..Default::default()
-    });
-    
-    println!("Enumerating available adapters...");
-    let adapters = instance.enumerate_adapters(wgpu::Backends::all());
-    
-    if adapters.is_empty() {
-        println!("\n⚠️  No GPU adapters found in this environment.");
-        println!("This is expected in headless/CI environments.");
-        println!("\nThe code is correct and would work on a system with GPU support.");
-        println!("Demonstrating the compute logic with CPU-side verification instead...\n");
-        
-        // Demonstrate the compute logic on CPU
-        demonstrate_compute_logic();
-        return;
-    }
-    
-    println!("Found {} adapter(s):", adapters.len());
-    for (i, adapter) in adapters.iter().enumerate() {
-        let info = adapter.get_info();
-        println!("  [{}] {} ({:?})", i, info.name, info.backend);
-    }
-    println!();
-    
-    // Use the first available adapter
-    let adapter = &adapters[0];
+    let instance = wgpu::Instance::default();
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions::default())
+        .await
+        .expect("Failed to find GPU adapter");
 
     let (device, queue) = adapter
         .request_device(
-            &wgpu::DeviceDescriptor {
-                label: None,
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-            },
+            &wgpu::DeviceDescriptor::default(),
             None,
         )
         .await
         .expect("Failed to create device");
 
-    println!("GPU Device: {:?}", adapter.get_info().name);
-    println!("Backend: {:?}\n", adapter.get_info().backend);
+    println!("Using GPU: {:?}", adapter.get_info().name);
 
-    // Create input data using our shared struct
-    let input_data = vec![
-        DataElement {
-            value: 1.0,
-            multiplier: 2.0,
-        },
-        DataElement {
-            value: 2.0,
-            multiplier: 3.0,
-        },
-        DataElement {
-            value: 3.0,
-            multiplier: 4.0,
-        },
-        DataElement {
-            value: 4.0,
-            multiplier: 5.0,
-        },
-    ];
-
-    println!("Input data:");
-    for (i, elem) in input_data.iter().enumerate() {
-        println!("  [{}] value: {}, multiplier: {}", i, elem.value, elem.multiplier);
+    let config = BeamformingConfig { speed_of_sound: 1540.0 };
+    let mut input_data = vec![0.0f32; NUM_CHANNELS * NUM_SAMPLES];
+    for s in 0..NUM_SAMPLES {
+        for c in 0..NUM_CHANNELS {
+            if s == 8 { input_data[s * NUM_CHANNELS + c] = 1.0; }
+        }
     }
 
-    // Run GPU computation
-    let results = execute_gpu_compute(&device, &queue, &input_data).await;
+    let results = execute_gpu_compute(&device, &queue, &input_data, config).await;
 
-    println!("\nOutput data (after GPU computation):");
+    println!("\nBeamformed Output (Sample 8 pulse):");
     for (i, result) in results.iter().enumerate() {
-        println!("  [{}] result: {}", i, result);
+        if *result > 0.0 {
+            println!("  Point [{:2}]: sum = {:8.1}", i, result);
+        }
     }
-
-    println!("\n=== GPU Compute Completed Successfully ===");
 }
 
 async fn execute_gpu_compute(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    input_data: &[DataElement],
+    input_data: &[f32],
+    config: BeamformingConfig,
 ) -> Vec<f32> {
-    // Create GPU shader module
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Compute Shader"),
-        source: wgpu::ShaderSource::Wgsl(COMPUTE_SHADER.into()),
+        label: None,
+        source: wgpu::util::make_spirv(include_bytes!(env!("SHADER_PATH"))),
     });
 
-    // Create input buffer
     let input_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Input Buffer"),
-        size: (input_data.len() * std::mem::size_of::<DataElement>()) as u64,
+        label: None,
+        size: (input_data.len() * 4) as u64,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
 
-    // Create output buffer
     let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Output Buffer"),
-        size: (input_data.len() * std::mem::size_of::<f32>()) as u64,
+        label: None,
+        size: (NUM_SAMPLES * 4) as u64,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
 
-    // Create staging buffer for reading results back to CPU
+    let config_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 4,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
     let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Staging Buffer"),
-        size: (input_data.len() * std::mem::size_of::<f32>()) as u64,
+        label: None,
+        size: (NUM_SAMPLES * 4) as u64,
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
 
-    // Write input data to GPU
     queue.write_buffer(&input_buffer, 0, bytemuck::cast_slice(input_data));
+    queue.write_buffer(&config_buffer, 0, bytemuck::bytes_of(&config));
 
-    // Create bind group layout
-    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Bind Group Layout"),
+    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: None,
         entries: &[
             wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
                 count: None,
             },
             wgpu::BindGroupLayoutEntry {
                 binding: 1,
                 visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
                 count: None,
             },
         ],
     });
 
-    // Create bind group
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("Bind Group"),
-        layout: &bind_group_layout,
+        label: None,
+        layout: &bgl,
         entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: input_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: output_buffer.as_entire_binding(),
-            },
+            wgpu::BindGroupEntry { binding: 0, resource: input_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: output_buffer.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 2, resource: config_buffer.as_entire_binding() },
         ],
     });
 
-    // Create compute pipeline
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Pipeline Layout"),
-        bind_group_layouts: &[&bind_group_layout],
+        label: None,
+        bind_group_layouts: &[&bgl],
         push_constant_ranges: &[],
     });
 
     let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Compute Pipeline"),
+        label: None,
         layout: Some(&pipeline_layout),
         module: &shader,
-        entry_point: "main",
+        entry_point: "main_shader",
     });
 
-    // Create command encoder and dispatch compute shader
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("Command Encoder"),
-    });
-
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
     {
-        let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("Compute Pass"),
-            timestamp_writes: None,
-        });
+        let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
         compute_pass.set_pipeline(&compute_pipeline);
         compute_pass.set_bind_group(0, &bind_group, &[]);
-        
-        // Calculate workgroup count based on a workgroup size of 64 (matching the shader)
-        let workgroup_size = 64;
-        let workgroup_count = (input_data.len() as u32 + workgroup_size - 1) / workgroup_size;
-        compute_pass.dispatch_workgroups(workgroup_count, 1, 1);
+        compute_pass.dispatch_workgroups(NUM_SAMPLES as u32, 1, 1);
     }
 
-    // Copy results to staging buffer
-    encoder.copy_buffer_to_buffer(
-        &output_buffer,
-        0,
-        &staging_buffer,
-        0,
-        (input_data.len() * std::mem::size_of::<f32>()) as u64,
-    );
-
-    // Submit commands
+    encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, (NUM_SAMPLES * 4) as u64);
     queue.submit(Some(encoder.finish()));
 
-    // Read results from GPU
     let buffer_slice = staging_buffer.slice(..);
-    let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
-    buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-        sender.send(result).unwrap();
-    });
+    let (tx, rx) = futures_intrusive::channel::shared::oneshot_channel();
+    buffer_slice.map_async(wgpu::MapMode::Read, move |res| tx.send(res).unwrap());
 
     device.poll(wgpu::Maintain::Wait);
-    receiver.receive().await.unwrap().unwrap();
+    rx.receive().await.unwrap().unwrap();
 
     let data = buffer_slice.get_mapped_range();
     let result: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
-
     drop(data);
     staging_buffer.unmap();
 
     result
 }
 
-// GPU Compute Shader (WGSL) - loaded from external file for better IDE support
-const COMPUTE_SHADER: &str = include_str!("compute.wgsl");
-
-/// Demonstrates the compute logic on CPU (for environments without GPU)
-fn demonstrate_compute_logic() {
-    let input_data = vec![
-        DataElement {
-            value: 1.0,
-            multiplier: 2.0,
-        },
-        DataElement {
-            value: 2.0,
-            multiplier: 3.0,
-        },
-        DataElement {
-            value: 3.0,
-            multiplier: 4.0,
-        },
-        DataElement {
-            value: 4.0,
-            multiplier: 5.0,
-        },
-    ];
-
-    println!("Input data (using shared DataElement struct):");
-    for (i, elem) in input_data.iter().enumerate() {
-        println!("  [{}] value: {}, multiplier: {}", i, elem.value, elem.multiplier);
-    }
-
-    // Simulate GPU computation on CPU
-    let results: Vec<f32> = input_data
-        .iter()
-        .map(|elem| elem.value * elem.multiplier)
-        .collect();
-
-    println!("\nOutput data (computed using GPU kernel logic):");
-    for (i, result) in results.iter().enumerate() {
-        println!("  [{}] result: {}", i, result);
-    }
-    
-    println!("\n✅ The GPU kernel would perform the same computation:");
-    println!("   output[i] = input[i].value * input[i].multiplier");
-    println!("\n=== Demonstration Completed Successfully ===");
-}

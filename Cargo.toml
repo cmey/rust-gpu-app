@@ -1,10 +1,23 @@
+[workspace]
+members = ["shader"]
+
 [package]
 name = "rust-gpu-app"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-wgpu = "0.19"
+wgpu = { version = "0.19", features = ["spirv"] }
 pollster = "0.3"
 bytemuck = { version = "1.14", features = ["derive"] }
 futures-intrusive = "0.5"
+
+[build-dependencies]
+spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu.git", package = "spirv-builder" }
+
+[profile.dev]
+opt-level = 3
+debug = false
+
+[profile.dev.package."*"]
+opt-level = 3
