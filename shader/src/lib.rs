@@ -29,9 +29,7 @@ pub fn main_shader(
     }
 
     // 2. Synchronize: Ensure all threads have finished writing to shared memory
-    unsafe {
-        spirv_std::arch::workgroup_memory_barrier_with_group_sync();
-    }
+    spirv_std::arch::workgroup_memory_barrier_with_group_sync();
 
     // 3. Summation scaled by Speed of Sound
     if thread_id == 0 {
